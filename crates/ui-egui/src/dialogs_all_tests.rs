@@ -13,7 +13,10 @@ fn measure_input_fits_external_sketch_geometry() {
     assert!(fits(accept, &curve));
     assert!(fits(accept, &point));
     assert_eq!(d.items(), vec![curve.clone(), point.clone()]);
-    assert_eq!(d.candidate(&h.app.session, &Hit::SketchCurve { sketch: 17, id: "line1".into(), straight: true }), Some(curve.clone()));
+    assert_eq!(
+        d.candidate(&h.app.session, &Hit::SketchCurve { sketch: 17, id: "line1".into(), straight: true, point: solidcraft_engine::geom::Vec3::ZERO }),
+        Some(curve.clone())
+    );
     assert_eq!(
         d.candidate(&h.app.session, &Hit::SketchPoint { sketch: 17, id: "p1".into(), at: solidcraft_engine::geom::Vec2::new(0.0, 0.0) }),
         Some(point.clone())
@@ -943,6 +946,33 @@ fn viewport_profile_click_returns_extrude_value_focus() {
     assert!((bounds.max.z - bounds.min.z - 30.0).abs() < 1e-7);
 }
 
+/// Typing `depth = 30` in the extrude dialog's distance defines the user parameter `depth` and
+/// the extrude uses it, in the dialog's one undo step; the preview made nothing (#4071).
+#[test]
+fn a_dialog_field_typed_as_a_definition_defines_the_parameter() {
+    let mut h = extrude_focus_fixture();
+    let undo = h.app.session.undo.len();
+    // As above: the first click returns focus to the distance, the second picks the profile.
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"30"})).unwrap();
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"depth = 30"})).unwrap();
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Extrude { distance, .. } if distance == "depth = 30"));
+    h.settle();
+    assert!(h.app.session.doc.param("depth").is_none(), "the preview defined nothing");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    h.settle();
+    assert!(h.app.dialog.is_none(), "{:?} {:?}", h.app.status, h.app.dialog.as_ref().map(|d| (d.error.clone(), format!("{:?}", d.kind))));
+    let doc = &h.app.session.doc;
+    let depth = doc.param("depth").expect("the user parameter was added");
+    assert!(!depth.model && depth.expr == "30" && depth.unit == "mm", "{depth:?}");
+    let extrude = doc.features.iter().rev().find(|f| f.name.starts_with("Extrude")).unwrap();
+    assert!(extrude.kind.inputs().iter().any(|(label, e, _)| *label == "Distance" && e == "depth"), "{:?}", extrude.kind.inputs());
+    assert_eq!(h.app.session.undo.len(), undo + 1, "one undo step");
+    let bounds = h.app.session.world_state().bodies.first().unwrap().mesh().bounds();
+    assert!((bounds.max.z - bounds.min.z - 30.0).abs() < 1e-7);
+}
+
 #[test]
 fn viewport_empty_click_falls_back_to_first_numeric_dialog_field() {
     let mut h = extrude_focus_fixture();
@@ -1010,4 +1040,24 @@ fn extrude_builds_the_one_region_clicked_where_the_face_outline_cuts_a_profile()
         let volume = h.app.run("inspect.measure", json!({})).unwrap()["total"]["volume_mm3"].as_f64().unwrap();
         assert!(((volume - before) - area * 5.0).abs() < 5e-3 * area * 5.0, "x = {x}: {volume} - {before} vs {}", area * 5.0);
     }
+}
+
+/// Every selection field of every command's dialog is labelled with a message the catalogs carry,
+/// so it reads in the user's language ("First edge", "Second point" read English everywhere when
+/// they were missing).
+#[test]
+fn every_selection_field_label_is_translated() {
+    let h = fixture();
+    let _japanese = crate::i18n::scope("ja");
+    let mut missing = std::collections::BTreeSet::new();
+    for spec in solidcraft_engine::command_specs() {
+        let Some(d) = Dialog::for_command(&h.app, spec.id) else { continue };
+        for input in &d.inputs {
+            let label = input.label.trim();
+            if label.chars().any(|c| c.is_ascii_alphabetic()) && crate::i18n::tr_label(label) == label {
+                missing.insert(format!("{}: {label}", spec.id));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "selection fields without a message: {missing:#?}");
 }
